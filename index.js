@@ -1,4 +1,4 @@
-require('dotenv').config(); 
+require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
@@ -21,16 +21,43 @@ const client = new MongoClient(uri, {
     }
 });
 
+const verifyToken = async (req, res, next) => {
+
+    const authorization = req.headers.authorization;
+
+
+    if (!authorization) {
+        return res.status(401).send({
+            message: "unauthorized access. Token not found!",
+        });
+    }
+
+    const token = authorization.split(" ")[1];
+    try {
+
+        const user = await admin.auth().verifyIdToken(token);
+        req.user = user;
+
+        next();
+    } catch (error) {
+        res.status(405).send({
+            message: "unauthorized access.",
+        });
+    }
+};
+
 async function run() {
     try {
-       
+
 
         const db = client.db("clubSphereDB");
         const clubsCollection = db.collection("clubsCollection");
         const wingsCollection = db.collection("wings");
         const eventsCollection = db.collection("events");
+        const joinClubCollection = db.collection("joinClubs");
+        const joinEventCollection = db.collection("joinEvents");
 
-       
+
         app.get('/clubsCollection', async (req, res) => {
             try {
                 const result = await clubsCollection.find().toArray();
@@ -59,6 +86,77 @@ async function run() {
                 res.status(500).send({ message: "Database error", error });
             }
         });
+
+        // jon clubs
+
+        app.get("/joinClubs", verifyToken, async (req, res) => {
+            const email = req.query.email;
+
+            if (req.user.email !== email) {
+                return res.status(403).send({ message: "Forbidden access" });
+            }
+
+            const result = await joinClubCollection
+                .find({ userEmail: email })
+                .toArray();
+
+            res.send(result);
+        });
+
+
+        app.post('/joinClubs/:id', verifyToken, async (req, res) => {
+            try {
+                const membership = req.body;
+
+                
+                if (membership.userEmail !== req.user.email) {
+                    return res.status(403).send({ message: "Forbidden access" });
+                }
+
+                membership.joinedAt = new Date();
+
+                const result = await joinClubCollection.insertOne(membership);
+
+                res.send({
+                    success: true,
+                    joinResult: result
+                });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ error: "Something went wrong!" });
+            }
+        });
+
+
+
+        // join events
+        app.post('/joinEvents/:id', verifyToken, async (req, res) => {
+            try {
+                const registration = req.body;
+                registration.registeredAt = new Date();
+                registration.status = "registered";
+
+                // Insert into joinEvents
+                const result = await joinEventCollection.insertOne(registration);
+
+                // Increment participants in events collection
+                const filter = { _id: new ObjectId(req.params.id) };
+                const update = { $inc: { participants: 1 } };
+                const participantsCount = await eventsCollection.updateOne(filter, update);
+
+                res.send({
+                    joinResult: result,
+                    participantsUpdate: participantsCount
+                });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ error: 'Something went wrong!' });
+            }
+        });
+
+
+
+
 
         app.get("/", (req, res) => {
             res.send("Hello, World!");
