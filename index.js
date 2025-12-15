@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -56,6 +57,7 @@ async function run() {
         const eventsCollection = db.collection("events");
         const joinClubCollection = db.collection("joinClubs");
         const joinEventCollection = db.collection("joinEvents");
+        const paymentsCollection = db.collection("payments");
 
 
         app.get('/clubsCollection', async (req, res) => {
@@ -136,6 +138,37 @@ async function run() {
         });
 
 
+        // my clubs
+
+        // GET /myClubs?email=user@example.com
+        app.get("/myClubs", verifyToken, async (req, res) => {
+            const email = req.query.email;
+
+            if (req.user.email !== email) {
+                return res.status(403).send({ message: "Forbidden access" });
+            }
+
+            try {
+                const joinRecords = await joinClubCollection.find({ userEmail: email }).toArray();
+
+                // Fetch club details for each join record
+                const clubIds = joinRecords.map(j => new ObjectId(j.clubId));
+                const clubs = await clubsCollection.find({ _id: { $in: clubIds } }).toArray();
+
+                // Merge join info with club info
+                const myClubs = clubs.map(club => {
+                    const joinInfo = joinRecords.find(j => j.clubId === club._id.toString());
+                    return { ...club, joinInfo };
+                });
+
+                res.send(myClubs);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to fetch joined clubs" });
+            }
+        });
+
+
 
 
         // join events
@@ -163,6 +196,38 @@ async function run() {
             }
         });
 
+
+        // payment
+
+        app.post("/payments", async (req, res) => {
+            try {
+                const payment = req.body;
+                payment.createdAt = new Date();
+
+                const result = await paymentsCollection.insertOne(payment);
+                res.send({ success: true, result });
+            } catch (err) {
+                res.status(500).send({ error: "Payment failed" });
+            }
+        });
+
+
+        // stripe
+        app.post('/create-checkout-session', async (req, res) => {
+            const paymentInfo = req.body;
+            const session = await stripe.checkout.sessions.create({
+                line_items: [
+                    {
+                        // Provide the exact Price ID (for example, price_1234) of the product you want to sell
+                        price: '{{PRICE_ID}}',
+                        customer_email: paymentInfo.senderEmail,
+                        quantity: 1,
+                    },
+                ],
+                mode: 'payment',
+                success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success`,
+            });
+        });
 
 
 
