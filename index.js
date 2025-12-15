@@ -2,7 +2,7 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -87,6 +87,22 @@ async function run() {
             }
         });
 
+        app.get("/events/:id", async (req, res) => {
+            try {
+                const eventId = req.params.id;
+                const event = await eventsCollection.findOne({ _id: new ObjectId(eventId) });
+
+                if (!event) {
+                    return res.status(404).send({ message: "Event not found" });
+                }
+
+                res.send(event);
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Server error" });
+            }
+        });
+
         // jon clubs
 
         app.get("/joinClubs", verifyToken, async (req, res) => {
@@ -104,28 +120,21 @@ async function run() {
         });
 
 
-        app.post('/joinClubs/:id', verifyToken, async (req, res) => {
+        app.post("/joinClubs", async (req, res) => {
             try {
-                const membership = req.body;
+                const membership = req.body; // contains userEmail, clubId, etc.
+                console.log("Received membership:", membership);
 
-                
-                if (membership.userEmail !== req.user.email) {
-                    return res.status(403).send({ message: "Forbidden access" });
-                }
-
-                membership.joinedAt = new Date();
-
+                // TODO: Save to database
                 const result = await joinClubCollection.insertOne(membership);
 
-                res.send({
-                    success: true,
-                    joinResult: result
-                });
-            } catch (error) {
-                console.error(error);
-                res.status(500).send({ error: "Something went wrong!" });
+                res.status(201).send({ success: true, joinResult: result });
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ error: "Something went wrong" });
             }
         });
+
 
 
 
@@ -136,10 +145,10 @@ async function run() {
                 registration.registeredAt = new Date();
                 registration.status = "registered";
 
-                // Insert into joinEvents
+
                 const result = await joinEventCollection.insertOne(registration);
 
-                // Increment participants in events collection
+
                 const filter = { _id: new ObjectId(req.params.id) };
                 const update = { $inc: { participants: 1 } };
                 const participantsCount = await eventsCollection.updateOne(filter, update);
