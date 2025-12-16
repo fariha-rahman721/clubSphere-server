@@ -23,29 +23,26 @@ const client = new MongoClient(uri, {
 });
 
 const verifyToken = async (req, res, next) => {
-
     const authorization = req.headers.authorization;
-
 
     if (!authorization) {
         return res.status(401).send({
-            message: "unauthorized access. Token not found!",
+            message: "Unauthorized access. Token not found!",
         });
     }
 
     const token = authorization.split(" ")[1];
     try {
-
         const user = await admin.auth().verifyIdToken(token);
         req.user = user;
-
         next();
     } catch (error) {
-        res.status(405).send({
-            message: "unauthorized access.",
+        res.status(401).send({  
+            message: "Unauthorized access.",
         });
     }
 };
+
 
 async function run() {
     try {
@@ -140,7 +137,7 @@ async function run() {
 
         // my clubs
 
-        // GET /myClubs?email=user@example.com
+
         app.get("/myClubs", verifyToken, async (req, res) => {
             const email = req.query.email;
 
@@ -151,11 +148,11 @@ async function run() {
             try {
                 const joinRecords = await joinClubCollection.find({ userEmail: email }).toArray();
 
-                // Fetch club details for each join record
+
                 const clubIds = joinRecords.map(j => new ObjectId(j.clubId));
                 const clubs = await clubsCollection.find({ _id: { $in: clubIds } }).toArray();
 
-                // Merge join info with club info
+
                 const myClubs = clubs.map(club => {
                     const joinInfo = joinRecords.find(j => j.clubId === club._id.toString());
                     return { ...club, joinInfo };
@@ -214,20 +211,39 @@ async function run() {
 
         // stripe
         app.post('/create-checkout-session', async (req, res) => {
-            const paymentInfo = req.body;
-            const session = await stripe.checkout.sessions.create({
-                line_items: [
-                    {
-                        // Provide the exact Price ID (for example, price_1234) of the product you want to sell
-                        price: '{{PRICE_ID}}',
-                        customer_email: paymentInfo.senderEmail,
-                        quantity: 1,
+            try {
+                const { amount, clubId, senderEmail, clubName } = req.body;
+
+                const session = await stripe.checkout.sessions.create({
+                    payment_method_types: ['card'],
+                    line_items: [
+                        {
+                            price_data: {
+                                currency: 'usd',
+                                unit_amount: amount * 100,
+                                product_data: {
+                                    name: clubName,
+                                },
+                            },
+                            quantity: 1,
+                        },
+                    ],
+                    mode: 'payment',
+                    metadata: {
+                        clubId,
                     },
-                ],
-                mode: 'payment',
-                success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success`,
-            });
+                    customer_email: senderEmail,
+                    success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success`,
+                    cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancel`,
+                });
+
+                res.send({ url: session.url });
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ error: 'Payment failed' });
+            }
         });
+
 
 
 
