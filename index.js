@@ -1,15 +1,23 @@
 require('dotenv').config();
-
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
+const admin = require("firebase-admin");
+const serviceAccount = require("./servicekey.json");
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+
+
+admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+});
+
 
 
 const uri = `mongodb+srv://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@cluster0.fh8zolv.mongodb.net/?appName=Cluster0`
@@ -37,7 +45,7 @@ const verifyToken = async (req, res, next) => {
         req.user = user;
         next();
     } catch (error) {
-        res.status(401).send({  
+        res.status(401).send({
             message: "Unauthorized access.",
         });
     }
@@ -135,6 +143,29 @@ async function run() {
         });
 
 
+        // leave club
+        app.delete("/leaveClub", async (req, res) => {
+            try {
+                const { clubId, userEmail } = req.body;
+
+                if (!clubId || !userEmail) {
+                    return res.status(400).send({ message: "Missing data" });
+                }
+
+                const result = await joinClubCollection.deleteOne({
+                    clubId,
+                    userEmail,
+                });
+
+                res.send(result);
+            } catch (error) {
+                console.error("Leave club error:", error);
+                res.status(500).send({ error: "Internal Server Error" });
+            }
+        });
+
+
+
         // my clubs
 
 
@@ -167,34 +198,85 @@ async function run() {
 
 
 
-
-        // join events
-        app.post('/joinEvents/:id', verifyToken, async (req, res) => {
+        // GET all events a user has joined (protected)
+        app.get("/joinEvents", verifyToken, async (req, res) => {
             try {
-                const registration = req.body;
-                registration.registeredAt = new Date();
-                registration.status = "registered";
+                const email = req.query.email;
 
+                if (req.user.email !== email) {
+                    return res.status(403).send({ message: "Forbidden access" });
+                }
 
-                const result = await joinEventCollection.insertOne(registration);
+                const result = await joinEventCollection
+                    .find({ userEmail: email })
+                    .toArray();
 
+                res.send(result);
+            } catch (err) {
+                console.error("Fetch joinEvents error:", err);
+                res.status(500).send({ error: "Failed to fetch joined events" });
+            }
+        });
 
-                const filter = { _id: new ObjectId(req.params.id) };
-                const update = { $inc: { participants: 1 } };
-                const participantsCount = await eventsCollection.updateOne(filter, update);
+        //  Join an event (protected)
+        app.post("/joinEvents", verifyToken, async (req, res) => {
+            try {
+                const { userEmail, eventId, joinedAt } = req.body;
 
-                res.send({
-                    joinResult: result,
-                    participantsUpdate: participantsCount
-                });
-            } catch (error) {
-                console.error(error);
-                res.status(500).send({ error: 'Something went wrong!' });
+                if (req.user.email !== userEmail) {
+                    return res.status(403).send({ message: "Unauthorized" });
+                }
+
+                if (!eventId) {
+                    return res.status(400).send({ message: "Missing eventId" });
+                }
+
+                const membership = {
+                    userEmail,
+                    eventId,
+                    joinedAt: joinedAt || new Date(),
+                };
+
+                const result = await joinEventCollection.insertOne(membership);
+
+                res.status(201).send({ success: true, joinResult: result });
+            } catch (err) {
+                console.error("Join event error:", err);
+                res.status(500).send({ error: "Failed to join event" });
             }
         });
 
 
-        // payment
+        // leave event
+        // Leave event
+        app.delete("/leaveEvent", async (req, res) => {
+            try {
+                const { eventId, userEmail } = req.body;
+
+                if (!eventId || !userEmail) {
+                    return res.status(400).send({ message: "Missing data" });
+                }
+
+                const result = await joinEventCollection.deleteOne({
+                    eventId,
+                    userEmail,
+                });
+
+                if (result.deletedCount === 0) {
+                    return res.status(404).send({ message: "Event not found or already left" });
+                }
+
+                res.send({ success: true, message: "Successfully left the event" });
+            } catch (error) {
+                console.error("Leave event error:", error);
+                res.status(500).send({ error: "Internal Server Error" });
+            }
+        });
+
+
+
+
+        // payment club
 
         app.post("/payments", async (req, res) => {
             try {
@@ -202,11 +284,51 @@ async function run() {
                 payment.createdAt = new Date();
 
                 const result = await paymentsCollection.insertOne(payment);
-                res.send({ success: true, result });
+
+                if (payment.type === "membership" && payment.clubId) {
+                    await clubsCollection.updateOne(
+                        { _id: new ObjectId(payment.clubId) },
+                        {
+                            $push: {
+                                members: {
+                                    userEmail: payment.userEmail,
+                                    joinedAt: new Date(),
+                                    paymentId: result.insertedId,
+                                    status: "active"
+                                }
+                            }
+                        }
+                    );
+                }
+
+                if (payment.type === "event" && payment.eventId) {
+                    await eventsCollection.updateOne(
+                        { _id: new ObjectId(payment.eventId) },
+                        {
+                            $push: {
+                                participants: {
+                                    userEmail: payment.userEmail,
+                                    registeredAt: new Date(),
+                                    paymentId: result.insertedId
+                                }
+                            }
+                        }
+                    );
+                }
+
+                res.send({
+                    success: true,
+                    message: "Payment processed successfully",
+                    paymentId: result.insertedId
+                });
+
             } catch (err) {
+                console.error(err);
                 res.status(500).send({ error: "Payment failed" });
             }
         });
+
+
 
 
         // stripe
