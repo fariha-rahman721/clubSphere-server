@@ -5,6 +5,7 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const admin = require("firebase-admin");
 const serviceAccount = require("./servicekey.json");
+const { Transaction } = require('firebase-admin/firestore');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -63,6 +64,7 @@ async function run() {
         const joinClubCollection = db.collection("joinClubs");
         const joinEventCollection = db.collection("joinEvents");
         const paymentsCollection = db.collection("payments");
+        const userCollection = db.collection("user");
 
 
         app.get('/clubsCollection', async (req, res) => {
@@ -177,16 +179,35 @@ async function run() {
             }
 
             try {
+                // 1. Free joined clubs
                 const joinRecords = await joinClubCollection.find({ userEmail: email }).toArray();
 
+                // 2. Paid memberships
+                const paidRecords = await paymentsCollection
+                    .find({ userEmail: email, type: "membership" })
+                    .toArray();
 
-                const clubIds = joinRecords.map(j => new ObjectId(j.clubId));
-                const clubs = await clubsCollection.find({ _id: { $in: clubIds } }).toArray();
+                // Combine club IDs
+                const allClubIds = [
+                    ...joinRecords.map(j => new ObjectId(j.clubId)),
+                    ...paidRecords.map(p => new ObjectId(p.clubId)),
+                ];
 
+                // Remove duplicates
+                const uniqueClubIds = [...new Set(allClubIds.map(id => id.toString()))].map(id => new ObjectId(id));
 
+                // Fetch all club details
+                const clubs = await clubsCollection.find({ _id: { $in: uniqueClubIds } }).toArray();
+
+                // Merge join info
                 const myClubs = clubs.map(club => {
-                    const joinInfo = joinRecords.find(j => j.clubId === club._id.toString());
-                    return { ...club, joinInfo };
+                    const freeJoin = joinRecords.find(j => j.clubId === club._id.toString());
+                    const paidJoin = paidRecords.find(p => p.clubId === club._id.toString());
+                    return {
+                        ...club,
+                        joinInfo: freeJoin || paidJoin || {},
+                        membershipType: paidJoin ? "paid" : "free"
+                    };
                 });
 
                 res.send(myClubs);
@@ -195,6 +216,9 @@ async function run() {
                 res.status(500).send({ message: "Failed to fetch joined clubs" });
             }
         });
+
+
+
 
 
 
@@ -246,8 +270,58 @@ async function run() {
             }
         });
 
+        app.get("/myEvents", verifyToken, async (req, res) => {
+            const email = req.query.email;
 
-        // leave event
+            if (req.user.email !== email) {
+                return res.status(403).send({ message: "Forbidden access" });
+            }
+
+            try {
+                // Free joined events
+                const freeJoins = await joinEventCollection
+                    .find({ userEmail: email })
+                    .toArray();
+
+                // Paid joined events
+                const paidJoins = await paymentsCollection
+                    .find({ userEmail: email, type: "event" })
+                    .toArray();
+
+                // Collect all event IDs
+                const eventIds = [
+                    ...freeJoins.map(j => new ObjectId(j.eventId)),
+                    ...paidJoins.map(p => new ObjectId(p.eventId)),
+                ];
+
+                // Remove duplicates
+                const uniqueEventIds = [
+                    ...new Set(eventIds.map(id => id.toString()))
+                ].map(id => new ObjectId(id));
+
+                // Fetch event details
+                const events = await eventsCollection
+                    .find({ _id: { $in: uniqueEventIds } })
+                    .toArray();
+
+                // Attach join type
+                const myEvents = events.map(event => {
+                    const paid = paidJoins.find(p => p.eventId === event._id.toString());
+                    return {
+                        ...event,
+                        joinType: paid ? "paid" : "free",
+                    };
+                });
+
+                res.send(myEvents);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to fetch events" });
+            }
+        });
+
+
+
         // Leave event
         app.delete("/leaveEvent", async (req, res) => {
             try {
@@ -278,9 +352,29 @@ async function run() {
 
         // payment club
 
+        app.get("/payments", async (req, res) => {
+            try {
+                const payments = await paymentsCollection.find().sort({ createdAt: -1 }).toArray();
+
+                const uniquePayments = [...new Map(payments.map(p => [p.transactionId, p])).values()];
+
+
+                const finalPayments = uniquePayments.map(p => ({
+                    ...p,
+                    displayName: p.clubName || p.eventName || "Unknown"
+                }));
+
+                res.send(finalPayments);
+            } catch (err) {
+                res.status(500).send({ message: "Failed to fetch payments", error: err });
+            }
+        });
+
+
         app.post("/payments", async (req, res) => {
             try {
                 const payment = req.body;
+
                 payment.createdAt = new Date();
 
                 const result = await paymentsCollection.insertOne(payment);
@@ -292,9 +386,11 @@ async function run() {
                             $push: {
                                 members: {
                                     userEmail: payment.userEmail,
+                                    clubName: payment.clubName,
                                     joinedAt: new Date(),
                                     paymentId: result.insertedId,
-                                    status: "active"
+                                    status: "active",
+                                    transactionId: payment.transactionId
                                 }
                             }
                         }
@@ -309,7 +405,9 @@ async function run() {
                                 participants: {
                                     userEmail: payment.userEmail,
                                     registeredAt: new Date(),
-                                    paymentId: result.insertedId
+                                    paymentId: result.insertedId,
+                                    clubName: payment.clubName,
+
                                 }
                             }
                         }
@@ -326,45 +424,170 @@ async function run() {
                 console.error(err);
                 res.status(500).send({ error: "Payment failed" });
             }
+            const cursor = paymentsCollection.find(query).sort({ createdAt: -1 })
         });
 
 
+
+        // payment related api
+        app.post('/payment-checkout-session', async (req, res) => {
+            const paymentInfo = req.body;
+            const amount = parseInt(paymentInfo.amount) * 100;
+
+            const session = await stripe.checkout.sessions.create({
+                line_items: [
+                    {
+                        price_data: {
+                            currency: "usd",
+                            unit_amount: amount,
+                            product_data: {
+                                name: `Please pay for: ${paymentInfo.clubName || paymentInfo.eventName}`
+                            }
+                        },
+                        quantity: 1,
+                    },
+                ],
+                mode: 'payment',
+                metadata: {
+                    type: paymentInfo.type, 
+                    clubId: paymentInfo.clubId || "",
+                    eventId: paymentInfo.eventId || "",
+                    clubName: paymentInfo.clubName || "",
+                    eventName: paymentInfo.eventName || "",
+                },
+                customer_email: paymentInfo.senderEmail,
+                success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancel`,
+            });
+
+            res.send({ url: session.url });
+        });
+
+
+
+        app.post("/confirm-payment", async (req, res) => {
+            try {
+                const { sessionId } = req.body;
+
+                const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+                if (!session || !session.payment_intent) {
+                    return res.status(400).send({ success: false, message: "Invalid session" });
+                }
+
+                // Prevent duplicate payments
+                const existingPayment = await paymentsCollection.findOne({
+                    transactionId: session.payment_intent
+                });
+
+                if (existingPayment) {
+                    return res.send({ success: true, message: "Payment already recorded" });
+                }
+
+
+                // Metadata
+                const metadata = session.metadata || {};
+                const type = metadata.type || "membership";
+                const clubId = metadata.clubId || null;
+                const eventId = metadata.eventId || null;
+                const clubName = metadata.clubName || "";
+                const eventName = metadata.eventName || "";
+
+                // Insert payment
+                const paymentDoc = {
+                    stripeSessionId: session.id,
+                    transactionId: session.payment_intent,
+                    userEmail: session.customer_email,
+                    clubId,
+                    eventId,
+                    clubName,
+                    eventName,
+                    amount: session.amount_total / 100,
+                    currency: session.currency,
+                    status: "paid",
+                    createdAt: new Date(),
+                    type
+                };
+
+
+                await paymentsCollection.insertOne(paymentDoc);
+
+
+                if (type === "membership" && clubId) {
+                    await joinClubCollection.updateOne(
+                        { userEmail: session.customer_email, clubId },
+                        { $set: { joinedAt: new Date(), status: "active", clubName } },
+                        { upsert: true }
+                    );
+
+                } else if (type === "event" && eventId) {
+                    await joinEventCollection.updateOne(
+                        { userEmail: session.customer_email, eventId },
+                        { $set: { joinedAt: new Date(), status: "active", eventName: metadata.eventName || "" } },
+                        { upsert: true }
+                    );
+                }
+
+
+                res.send({ success: true });
+            } catch (error) {
+                console.error("Confirm payment error:", error);
+                res.status(500).send({ success: false, message: "Server error" });
+            }
+        });
+
+
+
+
+
+        function generateTrackingId() {
+            return 'TRK-' + Math.random().toString(36).substr(2, 9).toUpperCase();
+        }
 
 
         // stripe
-        app.post('/create-checkout-session', async (req, res) => {
-            try {
-                const { amount, clubId, senderEmail, clubName } = req.body;
+        // app.post('/create-checkout-session', async (req, res) => {
+        //     try {
+        //         const { amount, clubId, senderEmail, clubName } = req.body;
 
-                const session = await stripe.checkout.sessions.create({
-                    payment_method_types: ['card'],
-                    line_items: [
-                        {
-                            price_data: {
-                                currency: 'usd',
-                                unit_amount: amount * 100,
-                                product_data: {
-                                    name: clubName,
-                                },
-                            },
-                            quantity: 1,
-                        },
-                    ],
-                    mode: 'payment',
-                    metadata: {
-                        clubId,
-                    },
-                    customer_email: senderEmail,
-                    success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success`,
-                    cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancel`,
-                });
+        //         const session = await stripe.checkout.sessions.create({
+        //             payment_method_types: ['card'],
+        //             line_items: [
+        //                 {
+        //                     price_data: {
+        //                         currency: 'usd',
+        //                         unit_amount: amount * 100,
+        //                         product_data: {
+        //                             name: clubName,
+        //                         },
+        //                     },
+        //                     quantity: 1,
+        //                 },
+        //             ],
+        //             mode: 'payment',
+        //             metadata: {
+        //                 clubId,
+        //             },
+        //             customer_email: senderEmail,
+        //             success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success`,
+        //             cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancel`,
+        //         });
 
-                res.send({ url: session.url });
-            } catch (error) {
-                console.error(error);
-                res.status(500).send({ error: 'Payment failed' });
-            }
-        });
+        //         res.send({ url: session.url });
+        //     } catch (error) {
+        //         console.error(error);
+        //         res.status(500).send({ error: 'Payment failed' });
+        //     }
+        // });
+
+
+
+        // save or update user in db
+        app.post('/user', async (req, res) => {
+            const userData = req.body;
+            const result = await userCollection.insertOne(userData);
+            res.send(result)
+        })
 
 
 
