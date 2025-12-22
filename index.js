@@ -6,6 +6,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET);
 const admin = require("firebase-admin");
 const serviceAccount = require("./servicekey.json");
 const { Transaction } = require('firebase-admin/firestore');
+require("dotenv").config();
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -640,17 +641,28 @@ async function run() {
         });
 
         // become a member
-        app.post('/memberRequest', verifyToken, async (req, res) => {
-            const email = req.tokenEmail
-            const alreadyExists = await memberRequestsCollection.findOne({ email })
-            if (alreadyExists)
-                return res
-                    .status(409)
-                    .send({ message: 'Already requested, wait koro.' })
+       app.post('/memberRequest', verifyToken, async (req, res) => {
+    try {
+        
+        const email = req.user?.email; 
 
-            const result = await memberRequestsCollection.insertOne({ email })
-            res.send(result)
-        })
+        if (!email) {
+            return res.status(400).send({ message: 'Email not found in token' });
+        }
+
+        const alreadyExists = await memberRequestsCollection.findOne({ email });
+        if (alreadyExists) {
+            return res.status(409).send({ message: 'Already requested, wait koro.' });
+        }
+
+        const result = await memberRequestsCollection.insertOne({ email });
+        res.send(result);
+    } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: 'Internal server error' });
+    }
+});
+
 
 
 
@@ -662,7 +674,7 @@ async function run() {
             res.send("Hello, World!");
         });
 
-        await client.db("admin").command({ ping: 1 });
+        // await client.db("admin").command({ ping: 1 });
         console.log("Connected to MongoDB successfully!");
     } catch (err) {
         console.log("DB connection error:", err);
