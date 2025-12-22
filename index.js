@@ -65,6 +65,7 @@ async function run() {
         const joinEventCollection = db.collection("joinEvents");
         const paymentsCollection = db.collection("payments");
         const userCollection = db.collection("user");
+        const memberRequestsCollection = db.collection("memberRequest");
 
 
         app.get('/clubsCollection', async (req, res) => {
@@ -184,7 +185,7 @@ async function run() {
 
                 // 2. Paid memberships
                 const paidRecords = await paymentsCollection
-                    .find({ userEmail: email, type: "membership" })
+                    .find({ Member: req.user })
                     .toArray();
 
                 // Combine club IDs
@@ -232,7 +233,7 @@ async function run() {
                 }
 
                 const result = await joinEventCollection
-                    .find({ userEmail: email })
+                    .find({ Member: req.user })
                     .toArray();
 
                 res.send(result);
@@ -280,7 +281,7 @@ async function run() {
             try {
                 // Free joined events
                 const freeJoins = await joinEventCollection
-                    .find({ userEmail: email })
+                    .find({ Member: req.user })
                     .toArray();
 
                 // Paid joined events
@@ -352,7 +353,7 @@ async function run() {
 
         // payment club
 
-        app.get("/payments", async (req, res) => {
+        app.get("/payments", verifyToken, async (req, res) => {
             try {
                 const payments = await paymentsCollection.find().sort({ createdAt: -1 }).toArray();
 
@@ -371,7 +372,7 @@ async function run() {
         });
 
 
-        app.post("/payments", async (req, res) => {
+        app.post("/payments", verifyToken, async (req, res) => {
             try {
                 const payment = req.body;
 
@@ -449,7 +450,7 @@ async function run() {
                 ],
                 mode: 'payment',
                 metadata: {
-                    type: paymentInfo.type, 
+                    type: paymentInfo.type,
                     clubId: paymentInfo.clubId || "",
                     eventId: paymentInfo.eventId || "",
                     clubName: paymentInfo.clubName || "",
@@ -582,12 +583,76 @@ async function run() {
 
 
 
+        // GET all users 
+        app.get('/user', verifyToken, async (req, res) => {
+            try {
+                const users = await userCollection.find().toArray()
+                res.send(users)
+            } catch (error) {
+                res.status(500).send({ message: 'Failed to fetch users' })
+            }
+        })
+
+
         // save or update user in db
         app.post('/user', async (req, res) => {
-            const userData = req.body;
-            const result = await userCollection.insertOne(userData);
+            try {
+                const userData = req.body;
+
+                const query = { email: userData.email };
+                const alreadyExists = await userCollection.findOne(query);
+
+                if (alreadyExists) {
+                    const result = await userCollection.updateOne(query, {
+                        $set: {
+                            last_loggedIn: new Date().toISOString(),
+                        },
+                    });
+                    return res.send(result);
+                }
+
+                // new user
+                userData.created_at = new Date().toISOString();
+                userData.last_loggedIn = new Date().toISOString();
+                userData.role = 'Member';
+
+                const result = await userCollection.insertOne(userData);
+                res.send(result);
+
+            } catch (error) {
+                console.error("User save error:", error);
+                res.status(500).send({ message: "User save failed" });
+            }
+        });
+
+        // get a user role
+
+        app.get('/user/role/:email', verifyToken, async (req, res) => {
+            const email = req.params.email;
+
+
+            if (req.user.email !== email) {
+                return res.status(403).send({ message: "Forbidden access" });
+            }
+
+            const result = await userCollection.findOne({ email });
+            res.send({ role: result?.role });
+        });
+
+        // become a member
+        app.post('/memberRequest', verifyToken, async (req, res) => {
+            const email = req.tokenEmail
+            const alreadyExists = await memberRequestsCollection.findOne({ email })
+            if (alreadyExists)
+                return res
+                    .status(409)
+                    .send({ message: 'Already requested, wait koro.' })
+
+            const result = await memberRequestsCollection.insertOne({ email })
             res.send(result)
         })
+
+
 
 
 
