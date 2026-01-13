@@ -67,6 +67,7 @@ async function run() {
         const paymentsCollection = db.collection("payments");
         const userCollection = db.collection("user");
         const memberRequestsCollection = db.collection("memberRequest");
+        const faqsCollection = db.collection("Faqs");
 
 
         app.get('/clubsCollection', async (req, res) => {
@@ -350,6 +351,16 @@ async function run() {
         });
 
 
+        // faqs 
+        app.get("/faqs", async (req, res) => {
+            try {
+                const faqs = await faqsCollection.find().toArray();
+                res.send(faqs);
+            } catch (error) {
+                console.error("Fetch FAQs error:", error);
+                res.status(500).send({ message: "Failed to fetch FAQs", error });
+            }
+        });
 
 
         // payment club
@@ -540,8 +551,6 @@ async function run() {
 
 
 
-
-
         function generateTrackingId() {
             return 'TRK-' + Math.random().toString(36).substr(2, 9).toUpperCase();
         }
@@ -641,31 +650,72 @@ async function run() {
         });
 
         // become a member
-       app.post('/memberRequest', verifyToken, async (req, res) => {
-    try {
-        
-        const email = req.user?.email; 
+        app.post('/memberRequest', verifyToken, async (req, res) => {
+            try {
+                const email = req.user?.email;
 
-        if (!email) {
-            return res.status(400).send({ message: 'Email not found in token' });
-        }
+                if (!email) {
+                    return res.status(400).send({ message: 'Email not found in token' });
+                }
 
-        const alreadyExists = await memberRequestsCollection.findOne({ email });
-        if (alreadyExists) {
-            return res.status(409).send({ message: 'Already requested, wait koro.' });
-        }
+                // get user info from users collection
+                const userData = await userCollection.findOne({ email });
 
-        const result = await memberRequestsCollection.insertOne({ email });
-        res.send(result);
-    } catch (error) {
-        console.error(error);
-        res.status(500).send({ message: 'Internal server error' });
-    }
-});
+                if (!userData) {
+                    return res.status(404).send({ message: 'User not found' });
+                }
+
+                const alreadyExists = await memberRequestsCollection.findOne({ email });
+                if (alreadyExists) {
+                    return res.status(409).send({ message: 'Already requested, wait koro.' });
+                }
+
+                const requestDoc = {
+                    email: userData.email,
+                    name: userData.name || userData.displayName || "N/A",
+                    role: userData.role,
+                    requestedAt: new Date(),
+                };
+
+                const result = await memberRequestsCollection.insertOne(requestDoc);
+                res.send(result);
+
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: 'Internal server error' });
+            }
+        });
 
 
 
+        // get all member request for admin
+        app.get('/allMemberRequest', verifyToken, async (req, res) => {
+            try {
+                const adminUser = await userCollection.findOne({ email: req.user.email });
 
+                if (adminUser?.role !== 'Admin') {
+                    return res.status(403).send({ message: 'Forbidden access' });
+                }
+
+                const result = await memberRequestsCollection.find().toArray();
+                res.send(result);
+            } catch (error) {
+                res.status(500).send({ message: 'Failed to fetch member requests' });
+            }
+        });
+
+
+        // update users role
+        app.patch('/update-role', verifyToken, async (req, res) => {
+            const { email, role } = req.body
+            const result = await userCollection.updateOne(
+                { email },
+                { $set: { role } }
+            )
+            await memberRequestsCollection.deleteOne({ email })
+
+            res.send(result)
+        })
 
 
 
