@@ -68,6 +68,8 @@ async function run() {
         const userCollection = db.collection("user");
         const memberRequestsCollection = db.collection("memberRequest");
         const faqsCollection = db.collection("Faqs");
+        const blogsCollection = db.collection("blogs");
+
 
 
         app.get('/clubsCollection', async (req, res) => {
@@ -220,11 +222,6 @@ async function run() {
             }
         });
 
-
-
-
-
-
         // GET all events a user has joined (protected)
         app.get("/joinEvents", verifyToken, async (req, res) => {
             try {
@@ -361,6 +358,44 @@ async function run() {
                 res.status(500).send({ message: "Failed to fetch FAQs", error });
             }
         });
+
+        // GET all blogs
+        app.get("/blogs", async (req, res) => {
+            try {
+                const blogs = await blogsCollection.find().sort({ date: -1 }).toArray();
+                res.send(blogs);
+            } catch (err) {
+                console.error(err);
+                res.status(500).send({ message: "Failed to fetch blogs" });
+            }
+        });
+
+        // GET single blog by ID
+        app.get("/blogs/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+
+                // ✅ SAFETY CHECK (THIS IS THE MISSING PIECE)
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid blog ID" });
+                }
+
+                const blog = await blogsCollection.findOne({
+                    _id: new ObjectId(id),
+                });
+
+                if (!blog) {
+                    return res.status(404).json({ message: "Blog not found" });
+                }
+
+                res.json(blog);
+            } catch (error) {
+                console.error("Blog fetch error:", error);
+                res.status(500).json({ message: "Server error" });
+            }
+        });
+
+
 
 
         // payment club
@@ -638,16 +673,22 @@ async function run() {
         // get a user role
 
         app.get('/user/role/:email', verifyToken, async (req, res) => {
-            const email = req.params.email;
+            try {
+                const email = req.params.email;
 
+                const result = await userCollection.findOne({ email });
 
-            if (req.user.email !== email) {
-                return res.status(403).send({ message: "Forbidden access" });
+                if (!result) {
+                    return res.send({ role: "Member" }); // default role
+                }
+
+                res.send({ role: result.role });
+            } catch (error) {
+                console.error("Error fetching role:", error);
+                res.status(500).send({ role: "Member", message: "Server error" });
             }
-
-            const result = await userCollection.findOne({ email });
-            res.send({ role: result?.role });
         });
+
 
         // become a member
         app.post('/memberRequest', verifyToken, async (req, res) => {
